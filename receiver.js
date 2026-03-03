@@ -1,47 +1,37 @@
-/* global cast, shaka */
+/* global cast */
 const context = cast.framework.CastReceiverContext.getInstance();
 const playerManager = context.getPlayerManager();
 
-let lastLicenseHeaders = null;
-
-function applyDrmConfig(customData) {
-  const drm = customData?.drm || {};
-  if (!drm.licenseUrl) return;
-
-  const config = {
-    drm: {
-      servers: {
-        'com.widevine.alpha': drm.licenseUrl,
-      },
-    },
-  };
-
-  playerManager.setPlayerConfig(config);
-
-  try {
-    const player = playerManager.getPlayer();
-    const headers = drm.headers || {};
-    if (player && headers && JSON.stringify(headers) !== JSON.stringify(lastLicenseHeaders)) {
-      lastLicenseHeaders = headers;
-      const net = player.getNetworkingEngine();
-      if (net) {
-        net.registerRequestFilter((type, request) => {
-          if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
-            request.headers = Object.assign({}, request.headers || {}, headers);
-          }
-        });
-      }
-    }
-  } catch (e) {
-    console.error('DRM config error', e);
-  }
-}
+// Shaka is loaded via the playback config; we access it through the player instance.
+// We register request filters after each LOAD so headers are always fresh.
 
 playerManager.setMessageInterceptor(
   cast.framework.messages.MessageType.LOAD,
   (loadRequestData) => {
     const customData = loadRequestData.media?.customData || {};
-    applyDrmConfig(customData);
+    const drm = customData?.drm || {};
+
+    if (drm.licenseUrl) {
+      // 1. Tell the CAF which Widevine license server to use.
+      playerManager.setMediaPlaybackInfoHandler((loadRequest, playbackConfig) => {
+        playbackConfig.licenseUrl = drm.licenseUrl;
+        playbackConfig.protectionSystem = cast.framework.ContentProtection.WIDEVINE;
+
+        // 2. Inject DRM headers (e.g. Authorization: Bearer …) on every license request.
+        const headers = drm.headers || {};
+        if (Object.keys(headers).length > 0) {
+          playbackConfig.licenseRequestHandler = (requestInfo) => {
+            requestInfo.headers = Object.assign({}, requestInfo.headers || {}, headers);
+          };
+        }
+
+        return playbackConfig;
+      });
+    } else {
+      // No DRM — clear any previously registered handler to avoid stale state.
+      playerManager.setMediaPlaybackInfoHandler(null);
+    }
+
     return loadRequestData;
   }
 );
