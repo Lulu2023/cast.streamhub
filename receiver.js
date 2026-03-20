@@ -3,67 +3,63 @@ const context = cast.framework.CastReceiverContext.getInstance();
 const playerManager = context.getPlayerManager();
 
 /**
- * Transforme une réponse DRMtoday JSON en ArrayBuffer binaire Widevine.
- * DRMtoday retourne : { "status": "OK", "license": "<base64>" }
- * Shaka/CAF attend des bytes binaires directement.
+ * DRMtoday retourne une réponse JSON : { "status": "OK", "license": "<base64>" }
+ * CAF/Widevine attend des bytes binaires bruts.
+ * licenseHandler prend la main sur tout le fetch → retourner Uint8Array.
  */
-function parseDrmtodayResponse(rawBuffer) {
-  try {
-    const text = new TextDecoder('utf-8').decode(new Uint8Array(rawBuffer));
-    if (!text.trimStart().startsWith('{')) return rawBuffer; // déjà binaire
-    const json = JSON.parse(text);
-    if (json.status !== 'OK' || !json.license) {
-      console.error('[Receiver] DRMtoday error:', json.status, json.message || '');
-      return rawBuffer;
-    }
-    const raw = atob(json.license);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    return bytes.buffer;
-  } catch (e) {
-    console.warn('[Receiver] DRMtoday parse failed, using raw response:', e);
-    return rawBuffer;
-  }
+function makeDrmtodayLicenseHandler(licenseUrl, headers) {
+  return function (drmRequest) {
+    return fetch(licenseUrl, {
+      method:  'POST',
+      headers: Object.assign({ 'Content-Type': 'application/octet-stream' }, headers),
+      body:    drmRequest.body,
+    })
+      .then(function (res) { return res.arrayBuffer(); })
+      .then(function (buf) {
+        var text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
+        if (!text.trimStart().startsWith('{')) {
+          // Déjà binaire (ne devrait pas arriver avec DRMtoday, mais sécurité)
+          return new Uint8Array(buf);
+        }
+        var json = JSON.parse(text);
+        if (json.status !== 'OK' || !json.license) {
+          console.error('[Receiver] DRMtoday error:', json.status, json.message || '');
+          throw new Error('DRMtoday licence refusée : ' + (json.message || json.status));
+        }
+        var raw   = atob(json.license);
+        var bytes = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        return bytes; // Uint8Array — requis par licenseHandler
+      });
+  };
 }
 
 playerManager.setMessageInterceptor(
   cast.framework.messages.MessageType.LOAD,
-  (loadRequestData) => {
-    const customData = loadRequestData.media?.customData || {};
-    const drm = customData?.drm || {};
+  function (loadRequestData) {
+    var customData = (loadRequestData.media && loadRequestData.media.customData) || {};
+    var drm        = customData.drm || {};
 
     if (drm.licenseUrl) {
-      playerManager.setMediaPlaybackInfoHandler((loadRequest, playbackConfig) => {
-        playbackConfig.licenseUrl = drm.licenseUrl;
+      playerManager.setMediaPlaybackInfoHandler(function (loadRequest, playbackConfig) {
         playbackConfig.protectionSystem = cast.framework.ContentProtection.WIDEVINE;
 
-        const headers = drm.headers || {};
-        const isDrmtoday = drm.provider === 'drmtoday';
+        var headers    = drm.headers    || {};
+        var isDrmtoday = drm.provider === 'drmtoday';
 
         if (isDrmtoday) {
-          // DRMtoday : injecter les headers ET transformer la réponse JSON → binaire
-          playbackConfig.licenseRequestHandler = (requestInfo) => {
-            requestInfo.headers = Object.assign({}, requestInfo.headers || {}, headers);
-          };
-
-          // licenseHandler remplace complètement l'acquisition de licence.
-          // On fait le fetch manuellement pour pouvoir parser la réponse JSON.
-          playbackConfig.licenseHandler = (drmRequest) => {
-            return fetch(drm.licenseUrl, {
-              method: 'POST',
-              headers: Object.assign(
-                { 'Content-Type': 'application/octet-stream' },
-                headers
-              ),
-              body: drmRequest.body,
-            })
-              .then((res) => res.arrayBuffer())
-              .then((buf) => parseDrmtodayResponse(buf));
-          };
+          // ── RTL Play / DRMtoday ──────────────────────────────────────────────
+          // licenseHandler remplace TOUT le cycle fetch+réponse.
+          // NE PAS définir licenseUrl simultanément (CAF utilise l'un OU l'autre).
+          playbackConfig.licenseHandler = makeDrmtodayLicenseHandler(drm.licenseUrl, headers);
+          // licenseUrl doit rester vide quand licenseHandler est défini
+          playbackConfig.licenseUrl = undefined;
         } else {
-          // Standard (RTBF, TF1) : injecter les headers uniquement
+          // ── RTBF / TF1+ : réponse binaire standard ──────────────────────────
+          // licenseRequestHandler injecte seulement les headers ; CAF gère le reste.
+          playbackConfig.licenseUrl = drm.licenseUrl;
           if (Object.keys(headers).length > 0) {
-            playbackConfig.licenseRequestHandler = (requestInfo) => {
+            playbackConfig.licenseRequestHandler = function (requestInfo) {
               requestInfo.headers = Object.assign({}, requestInfo.headers || {}, headers);
             };
           }
@@ -72,6 +68,7 @@ playerManager.setMessageInterceptor(
         return playbackConfig;
       });
     } else {
+      // Pas de DRM — effacer tout handler précédent pour éviter un état résiduel
       playerManager.setMediaPlaybackInfoHandler(null);
     }
 
@@ -80,6 +77,6 @@ playerManager.setMessageInterceptor(
 );
 
 context.start({
-  useIdleTimeout: true,
-  maxInactivity: 900,
+  useIdleTimeout:  true,
+  maxInactivity:   900,
 });
