@@ -535,19 +535,19 @@
   // native, app sender, Google Assistant, contrôles tactiles) — c'est
   // précisément le canal que CAF garantit cross-plateforme pour ce type
   // d'interaction, contrairement aux événements clavier bas niveau.
+  // Note : REQUEST_PAUSE est un événement non annulable (contrairement à
+  // un setMessageInterceptor), et sur certaines plateformes Android TV
+  // (Mi Box notamment), le bouton OK de la télécommande déclenche une
+  // pause entièrement côté natif Android (MediaSession système), SANS
+  // jamais traverser le PlayerManager CAF/JS — ni keydown, ni
+  // MessageType.PAUSE, ni REQUEST_PAUSE ne sont alors observés côté JS.
+  // Voir SKIP_INTRO_PLATFORM_LIMITATIONS plus bas pour le contournement
+  // côté sender retenu pour ce cas.
   playerManager.addEventListener(
     cast.framework.events.EventType.REQUEST_PAUSE,
     (event) => {
       if (StreamHubUI.isSkipIntroVisible()) {
-        const skipped = StreamHubUI.activateSkipIntroIfVisible();
-        console.log('[StreamHub Receiver] REQUEST_PAUSE pendant Skip Intro visible → skip déclenché : ' + skipped);
-        // On ne peut pas annuler un EventType (contrairement à un
-        // setMessageInterceptor), donc la pause CAF va quand même
-        // s'exécuter brièvement ; on relance immédiatement la lecture
-        // pour neutraliser cet effet de bord et ne garder que le skip.
-        if (skipped) {
-          playerManager.play();
-        }
+        console.log('[StreamHub Receiver] REQUEST_PAUSE pendant Skip Intro visible (event informatif, non bloquant).');
       }
     }
   );
