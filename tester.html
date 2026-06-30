@@ -288,11 +288,16 @@
       <button class="secondary speed-btn" data-speed="2" disabled>2×</button>
     </div>
 
-    <label>Skip Intro manuel <span class="pill">SKIP_INTRO</span></label>
-    <div class="row">
-      <input type="number" id="skipIntroToValue" placeholder="Position cible (s)" />
-      <button id="btnSkipIntro" disabled style="flex: 0 0 auto;">Skip Intro</button>
+    <label>Skip Intro <span class="pill">SKIP_INTRO</span></label>
+    <div id="skipIntroConfirmBox" style="display:none; margin-bottom:8px; padding:10px; background:#1c2a1c; border:1px solid #2f5a2f; border-radius:6px;">
+      <div style="font-size:13px; margin-bottom:6px;">Le bouton "Passer l'intro" est affiché sur le receiver — comme si l'utilisateur ne pouvait pas (ou ne voulait pas) utiliser la télécommande.</div>
+      <button id="btnConfirmSkipIntro">✓ Confirmer depuis l'appli</button>
     </div>
+    <div class="row">
+      <input type="number" id="skipIntroToValue" placeholder="Position cible (s) — test manuel" />
+      <button id="btnSkipIntro" disabled style="flex: 0 0 auto;">Envoyer SKIP_INTRO</button>
+    </div>
+    <div class="hint">La boîte verte apparaît automatiquement dès que le receiver signale le bouton visible (SKIP_INTRO_VISIBILITY), pour reproduire le vrai flux app : l'utilisateur confirme depuis le téléphone sans avoir à connaître le timestamp.</div>
 
     <div style="margin-top: 10px;">
       <button id="btnRequestState" disabled class="secondary">Forcer REQUEST_STATE</button>

@@ -512,45 +512,26 @@
   // IMPORTANT : écoute en phase de CAPTURE (3e argument `true`), pas en
   // phase de bouillonnement (bubbling) par défaut. Le composant natif
   // <cast-media-player> a sa propre gestion interne du bouton OK de la
-  // télécommande (il l'utilise pour togglee play/pause sur ses contrôles
+  // télécommande (il l'utilise pour toggler play/pause sur ses contrôles
   // visibles) et peut intercepter/arrêter l'event avant qu'il ne nous
   // atteigne si on écoute en bubbling. En capture, notre listener voit
   // l'event AVANT le cast-media-player, donc avant qu'il puisse le
   // consommer en interne.
-  // Filet de sécurité UNIVERSEL pour le Skip Intro via télécommande.
   //
-  // Pourquoi pas un simple `keydown` DOM : sur Android TV / Google TV
-  // (Mi Box, décodeurs, téléviseurs intégrés...), le bouton OK de la
-  // télécommande est généralement intercepté au niveau du système Android
-  // natif AVANT d'atteindre la WebView qui héberge ce receiver (confirmé
-  // par investigation : keyCode=23/DPAD_CENTER traité par le
-  // WindowManager Android, sans jamais déclencher le moindre événement
-  // DOM keydown côté JS). Compter sur `document.addEventListener('keydown')`
-  // n'est donc PAS universel.
-  //
-  // La bonne approche cross-device est d'utiliser l'API CAF de haut
-  // niveau cast.framework.events.EventType.REQUEST_PAUSE : cet event est
-  // déclenché par PlayerManager juste AVANT d'exécuter une pause, quelle
-  // que soit la source réelle de la commande (télécommande physique
-  // native, app sender, Google Assistant, contrôles tactiles) — c'est
-  // précisément le canal que CAF garantit cross-plateforme pour ce type
-  // d'interaction, contrairement aux événements clavier bas niveau.
-  // Note : REQUEST_PAUSE est un événement non annulable (contrairement à
-  // un setMessageInterceptor), et sur certaines plateformes Android TV
-  // (Mi Box notamment), le bouton OK de la télécommande déclenche une
-  // pause entièrement côté natif Android (MediaSession système), SANS
-  // jamais traverser le PlayerManager CAF/JS — ni keydown, ni
-  // MessageType.PAUSE, ni REQUEST_PAUSE ne sont alors observés côté JS.
-  // Voir SKIP_INTRO_PLATFORM_LIMITATIONS plus bas pour le contournement
-  // côté sender retenu pour ce cas.
-  playerManager.addEventListener(
-    cast.framework.events.EventType.REQUEST_PAUSE,
-    (event) => {
-      if (StreamHubUI.isSkipIntroVisible()) {
-        console.log('[StreamHub Receiver] REQUEST_PAUSE pendant Skip Intro visible (event informatif, non bloquant).');
-      }
-    }
-  );
+  // Limite connue : sur certaines plateformes Android TV où le Web
+  // Receiver tourne dans l'app système générique Google (cast_shell /
+  // com.google.android.apps.mediashell — c'est le cas par exemple des
+  // Xiaomi Mi Box), le bouton OK de la télécommande peut être consommé
+  // entièrement côté natif Android (MediaSession système) AVANT
+  // d'atteindre cette WebView : aucun keydown DOM n'est alors observable
+  // en JS, quelle que soit la méthode d'interception utilisée (vérifié
+  // par investigation : ni keydown, ni MessageType.PAUSE, ni
+  // REQUEST_PAUSE ne sont déclenchés dans ce cas précis). Ce n'est pas
+  // corrigible depuis le receiver web seul — c'est pourquoi le bouton
+  // Skip Intro affiche aussi une invite à confirmer depuis l'app (voir
+  // ui.js), qui reste le déclenchement garanti sur toutes les
+  // plateformes. Sur un vrai dongle Chromecast, ce keydown fonctionne
+  // normalement.
 
   const handleRemoteKeydown = (event) => {
     const isOk = event.keyCode === 13 || event.key === 'Enter' || event.code === 'Enter' || event.code === 'Select';

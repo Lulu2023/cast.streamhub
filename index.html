@@ -116,15 +116,14 @@
       bottom: 90px;
       right: 60px;
       display: none;
-      align-items: center;
-      gap: 10px;
-      padding: 16px 28px;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      padding: 14px 26px;
       background: rgba(20, 20, 24, 0.92);
       border: 2px solid rgba(255,255,255,0.85);
       border-radius: 8px;
       color: #fff;
-      font-size: 22px;
-      font-weight: 500;
       z-index: 9998;
       transition: opacity 0.2s ease, transform 0.2s ease;
     }
@@ -135,6 +134,23 @@
       background: #ffffff;
       color: #000;
       transform: scale(1.04);
+    }
+
+    #skipIntroButton .skipIntroMain {
+      font-size: 22px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    #skipIntroButton .skipIntroHint {
+      font-size: 13px;
+      font-weight: 400;
+      opacity: 0.75;
+      white-space: nowrap;
+    }
+
+    #skipIntroButton.focused .skipIntroHint {
+      opacity: 0.55;
     }
   </style>
 </head>
@@ -160,7 +176,10 @@
     <div class="message" id="errorMessage">Une erreur est survenue.</div>
   </div>
 
-  <div id="skipIntroButton">Passer l'intro ▸</div>
+  <div id="skipIntroButton">
+    <div class="skipIntroMain">Passer l'intro ▸</div>
+    <div class="skipIntroHint">OK sur la télécommande, ou confirmez depuis l'appli</div>
+  </div>
 
   <!-- CAF SDK -->
   <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>

@@ -16,6 +16,7 @@ const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845';
 let castSession = null;
 let remotePlayer = null;
 let remotePlayerController = null;
+let currentIntroEndMs = null; // mémorisé depuis le LOAD_VIDEO envoyé, pour la confirmation app
 
 // ── Logging ────────────────────────────────────────────────────────────
 
@@ -180,6 +181,7 @@ function handleIncomingMessage(message) {
       break;
     case 'SKIP_INTRO_VISIBILITY':
       log('sys', `Skip Intro ${message.visible ? 'AFFICHÉ' : 'masqué'} sur le receiver.`);
+      document.getElementById('skipIntroConfirmBox').style.display = message.visible ? 'block' : 'none';
       break;
     case 'VIDEO_CHANGED':
       log('sys', `Vidéo changée sur le receiver : contentId=${message.contentId}, queueIndex=${message.queueIndex}`);
@@ -304,6 +306,7 @@ document.getElementById('btnLoad').addEventListener('click', () => {
   }
 
   sendMessage({ type: 'LOAD_VIDEO', media, ...(queue.length ? { queue } : {}) });
+  currentIntroEndMs = introMarker ? introMarker.endMs : null;
 });
 
 // ── Contrôles de lecture ──────────────────────────────────────────────────
@@ -358,6 +361,15 @@ document.querySelectorAll('.speed-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     sendMessage({ type: 'SET_PLAYBACK_SPEED', speed: Number(btn.dataset.speed) });
   });
+});
+
+document.getElementById('btnConfirmSkipIntro').addEventListener('click', () => {
+  if (currentIntroEndMs == null) {
+    log('err', "Aucun marqueur d'intro mémorisé pour cette vidéo — rechargez avec un intervalle Skip Intro renseigné.");
+    return;
+  }
+  sendMessage({ type: 'SKIP_INTRO', toMs: currentIntroEndMs });
+  document.getElementById('skipIntroConfirmBox').style.display = 'none';
 });
 
 document.getElementById('btnSkipIntro').addEventListener('click', () => {
