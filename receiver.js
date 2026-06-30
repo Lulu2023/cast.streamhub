@@ -183,7 +183,9 @@
   }
 
   function doSkipIntro(toMs) {
-    playerManager.seek({ currentTime: toMs / 1000 });
+    const seekRequest = new cast.framework.messages.SeekRequestData();
+    seekRequest.currentTime = toMs / 1000;
+    playerManager.seek(seekRequest);
     StreamHubUI.setSkipIntroVisible(false);
     sendToAllSenders(ReceiverMessageType.SKIP_INTRO_VISIBILITY, { visible: false });
   }
