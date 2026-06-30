@@ -509,13 +509,25 @@
     }
   );
 
+  // IMPORTANT : écoute en phase de CAPTURE (3e argument `true`), pas en
+  // phase de bouillonnement (bubbling) par défaut. Le composant natif
+  // <cast-media-player> a sa propre gestion interne du bouton OK de la
+  // télécommande (il l'utilise pour togglee play/pause sur ses contrôles
+  // visibles) et peut intercepter/arrêter l'event avant qu'il ne nous
+  // atteigne si on écoute en bubbling. En capture, notre listener voit
+  // l'event AVANT le cast-media-player, donc avant qu'il puisse le
+  // consommer en interne.
   document.addEventListener('keydown', (event) => {
     // 'Enter' correspond au bouton OK de la télécommande Chromecast/Android TV.
     if (event.keyCode === 13 /* Enter/OK */) {
       if (StreamHubUI.activateSkipIntroIfVisible()) {
+        event.stopImmediatePropagation();
         event.stopPropagation();
         event.preventDefault();
       }
+      // Si le bouton n'est pas affiché, on NE bloque PAS l'event : il
+      // continue normalement vers cast-media-player pour son comportement
+      // par défaut (play/pause).
       return;
     }
 
@@ -527,13 +539,14 @@
       const PS = cast.framework.messages.PlayerState;
       if (state === PS.PLAYING || state === PS.PAUSED || state === PS.BUFFERING) {
         playerManager.pause();
+        event.stopImmediatePropagation();
         event.stopPropagation();
         event.preventDefault();
       }
       // Si déjà à l'arrêt/IDLE, on laisse CAF gérer son comportement par
       // défaut (peut fermer l'application sur certaines plateformes).
     }
-  });
+  }, true /* useCapture */);
 
   // ─────────────────────────────────────────────────────────────────────
   // Options de démarrage du receiver.
