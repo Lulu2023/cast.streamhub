@@ -517,24 +517,46 @@
   // atteigne si on écoute en bubbling. En capture, notre listener voit
   // l'event AVANT le cast-media-player, donc avant qu'il puisse le
   // consommer en interne.
-  document.addEventListener('keydown', (event) => {
-    // 'Enter' correspond au bouton OK de la télécommande Chromecast/Android TV.
-    if (event.keyCode === 13 /* Enter/OK */) {
-      if (StreamHubUI.activateSkipIntroIfVisible()) {
+  // Filet de sécurité supplémentaire : sur certains appareils/firmwares,
+  // le bouton OK de la télécommande peut être traduit directement par CAF
+  // en commande standard PAUSE plutôt qu'en keydown DOM brut (ce qui
+  // expliquerait une mise en pause au lieu du skip si le keydown n'était
+  // jamais vu). En interceptant le message PAUSE lui-même, on peut
+  // détourner cette commande vers le skip intro quand le bouton est
+  // affiché, indépendamment de la façon dont la télécommande a été
+  // traduite en amont.
+  playerManager.setMessageInterceptor(
+    cast.framework.messages.MessageType.PAUSE,
+    (pauseRequestData) => {
+      if (StreamHubUI.isSkipIntroVisible()) {
+        const skipped = StreamHubUI.activateSkipIntroIfVisible();
+        console.log('[StreamHub Receiver] PAUSE intercepté pendant Skip Intro visible → skip déclenché à la place : ' + skipped);
+        if (skipped) {
+          // On annule la pause en ne laissant PAS passer la requête.
+          return null;
+        }
+      }
+      return pauseRequestData;
+    }
+  );
+
+  const handleRemoteKeydown = (event) => {
+    const isOk = event.keyCode === 13 || event.key === 'Enter' || event.code === 'Enter' || event.code === 'Select';
+    const isBack = event.keyCode === 27 || event.keyCode === 4
+      || event.key === 'Escape' || event.key === 'BrowserBack' || event.key === 'GoBack' || event.code === 'Escape';
+
+    if (isOk) {
+      const skipped = StreamHubUI.activateSkipIntroIfVisible();
+      console.log('[StreamHub Receiver] Touche OK reçue. skipIntroVisible=' + StreamHubUI.isSkipIntroVisible() + ' → skipped=' + skipped);
+      if (skipped) {
         event.stopImmediatePropagation();
         event.stopPropagation();
         event.preventDefault();
       }
-      // Si le bouton n'est pas affiché, on NE bloque PAS l'event : il
-      // continue normalement vers cast-media-player pour son comportement
-      // par défaut (play/pause).
       return;
     }
 
-    // 'Escape' / codes 27 et 4 correspondent à la touche Retour selon les
-    // plateformes Cast (Android TV utilise souvent keyCode 4 — code
-    // historique Android BACK — en plus du standard web 27).
-    if (event.keyCode === 27 || event.keyCode === 4) {
+    if (isBack) {
       const state = playerManager.getPlayerState();
       const PS = cast.framework.messages.PlayerState;
       if (state === PS.PLAYING || state === PS.PAUSED || state === PS.BUFFERING) {
@@ -546,7 +568,23 @@
       // Si déjà à l'arrêt/IDLE, on laisse CAF gérer son comportement par
       // défaut (peut fermer l'application sur certaines plateformes).
     }
-  }, true /* useCapture */);
+  };
+
+  // On écoute à DEUX endroits, en phase de capture (avant que la cible ne
+  // traite l'event) :
+  // 1. document — cas général.
+  // 2. le <cast-media-player> lui-même — car ce composant gère en interne
+  //    le bouton OK pour son propre toggle play/pause, et selon la
+  //    composition de son Shadow DOM, il peut arrêter la propagation de
+  //    l'event avant même que la phase de capture descendante depuis
+  //    `document` n'ait formellement "traversé" sa frontière logique. En
+  //    écoutant directement dessus en capture, on intercepte l'event au
+  //    plus tôt possible, avant que le composant ne le traite lui-même.
+  document.addEventListener('keydown', handleRemoteKeydown, true);
+  const castPlayerEl = document.getElementById('player');
+  if (castPlayerEl) {
+    castPlayerEl.addEventListener('keydown', handleRemoteKeydown, true);
+  }
 
   // ─────────────────────────────────────────────────────────────────────
   // Options de démarrage du receiver.
