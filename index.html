@@ -1,30 +1,173 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>StreamHub Cast Receiver</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 100%;
-        height: 100%;
-        background: #0b0d12;
-        color: #fff;
-        font-family: Arial, sans-serif;
-      }
-      cast-media-player {
-        --background-color: #0b0d12;
-        --progress-color: #3b82f6;
-        --splash-image: url('/tv-icon.svg');
-      }
-    </style>
-    <!-- Cast Application Framework (CAF) receiver — handles DASH + Widevine natively -->
-    <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-    <script src="receiver.js" defer></script>
-  </head>
-  <body>
-    <cast-media-player></cast-media-player>
-  </body>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>StreamHub — Custom Receiver</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+    }
+
+    cast-media-player {
+      --splash-image: url('assets/splash.png');
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ─────────────────────────────────────────────────────────────────
+       Overlays custom : idle / loading / error / skip-intro
+       Toujours au-dessus du <cast-media-player>, contrôlés en JS.
+       ───────────────────────────────────────────────────────────────── */
+
+    .overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      background: #0b0b10;
+      color: #fff;
+      z-index: 9999;
+      text-align: center;
+    }
+
+    .overlay.visible { display: flex; }
+
+    #idleOverlay {
+      background: radial-gradient(circle at center, #14141c 0%, #060608 100%);
+    }
+
+    #idleOverlay .logo {
+      width: 160px;
+      height: 160px;
+      margin-bottom: 32px;
+      object-fit: contain;
+      opacity: 0.95;
+    }
+
+    #idleOverlay .title {
+      font-size: 36px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+
+    #idleOverlay .subtitle {
+      margin-top: 12px;
+      font-size: 20px;
+      color: #9a9aa5;
+    }
+
+    #loadingOverlay .spinner {
+      width: 64px;
+      height: 64px;
+      border: 6px solid rgba(255,255,255,0.15);
+      border-top-color: #ffffff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin-bottom: 28px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #loadingOverlay .videoTitle {
+      font-size: 30px;
+      font-weight: 500;
+      max-width: 80%;
+      margin-bottom: 8px;
+    }
+
+    #loadingOverlay .message {
+      font-size: 18px;
+      color: #9a9aa5;
+    }
+
+    #errorOverlay {
+      background: #1a0d0d;
+    }
+
+    #errorOverlay .icon {
+      font-size: 64px;
+      margin-bottom: 24px;
+    }
+
+    #errorOverlay .title {
+      font-size: 30px;
+      font-weight: 500;
+      margin-bottom: 12px;
+    }
+
+    #errorOverlay .message {
+      font-size: 18px;
+      color: #d0a0a0;
+      max-width: 70%;
+    }
+
+    /* ── Bouton "Passer l'intro" ───────────────────────────────────── */
+
+    #skipIntroButton {
+      position: absolute;
+      bottom: 90px;
+      right: 60px;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 28px;
+      background: rgba(20, 20, 24, 0.92);
+      border: 2px solid rgba(255,255,255,0.85);
+      border-radius: 8px;
+      color: #fff;
+      font-size: 22px;
+      font-weight: 500;
+      z-index: 9998;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    #skipIntroButton.visible { display: flex; }
+
+    #skipIntroButton.focused {
+      background: #ffffff;
+      color: #000;
+      transform: scale(1.04);
+    }
+  </style>
+</head>
+<body>
+
+  <cast-media-player id="player"></cast-media-player>
+
+  <div id="idleOverlay" class="overlay">
+    <img class="logo" src="assets/logo.png" alt="" onerror="this.style.display='none'" />
+    <div class="title">Prêt à diffuser</div>
+    <div class="subtitle">Sélectionnez un contenu depuis votre application</div>
+  </div>
+
+  <div id="loadingOverlay" class="overlay">
+    <div class="spinner"></div>
+    <div class="videoTitle" id="loadingVideoTitle"></div>
+    <div class="message">Chargement de la vidéo...</div>
+  </div>
+
+  <div id="errorOverlay" class="overlay">
+    <div class="icon">⚠️</div>
+    <div class="title">Lecture impossible</div>
+    <div class="message" id="errorMessage">Une erreur est survenue.</div>
+  </div>
+
+  <div id="skipIntroButton">Passer l'intro ▸</div>
+
+  <!-- CAF SDK -->
+  <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+
+  <script src="messages.js"></script>
+  <script src="drm.js"></script>
+  <script src="ui.js"></script>
+  <script src="receiver.js"></script>
+</body>
 </html>

@@ -1,82 +1,525 @@
-/* global cast */
-const context = cast.framework.CastReceiverContext.getInstance();
-const playerManager = context.getPlayerManager();
-
 /**
- * DRMtoday retourne une réponse JSON : { "status": "OK", "license": "<base64>" }
- * CAF/Widevine attend des bytes binaires bruts.
- * licenseHandler prend la main sur tout le fetch → retourner Uint8Array.
+ * receiver.js
+ * ─────────────────────────────────────────────────────────────────────────
+ * Point d'entrée du Custom Web Receiver Chromecast (Cast Application
+ * Framework / CAF). Reçoit les commandes du sender (app Flutter) via le
+ * namespace custom `urn:x-cast:com.streamhub.cast`, pilote le
+ * PlayerManager CAF, gère la queue (enchaînement sans relancer la session),
+ * le skip intro, et renvoie périodiquement l'état au sender.
+ * ─────────────────────────────────────────────────────────────────────────
  */
-function makeDrmtodayLicenseHandler(licenseUrl, headers) {
-  return function (drmRequest) {
-    return fetch(licenseUrl, {
-      method:  'POST',
-      headers: Object.assign({ 'Content-Type': 'application/octet-stream' }, headers),
-      body:    drmRequest.body,
-    })
-      .then(function (res) { return res.arrayBuffer(); })
-      .then(function (buf) {
-        var text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
-        if (!text.trimStart().startsWith('{')) {
-          // Déjà binaire (ne devrait pas arriver avec DRMtoday, mais sécurité)
-          return new Uint8Array(buf);
-        }
-        var json = JSON.parse(text);
-        if (json.status !== 'OK' || !json.license) {
-          console.error('[Receiver] DRMtoday error:', json.status, json.message || '');
-          throw new Error('DRMtoday licence refusée : ' + (json.message || json.status));
-        }
-        var raw   = atob(json.license);
-        var bytes = new Uint8Array(raw.length);
-        for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        return bytes; // Uint8Array — requis par licenseHandler
-      });
-  };
-}
 
-playerManager.setMessageInterceptor(
-  cast.framework.messages.MessageType.LOAD,
-  function (loadRequestData) {
-    var customData = (loadRequestData.media && loadRequestData.media.customData) || {};
-    var drm        = customData.drm || {};
+(function () {
+  const context = cast.framework.CastReceiverContext.getInstance();
+  const playerManager = context.getPlayerManager();
 
-    if (drm.licenseUrl) {
-      playerManager.setMediaPlaybackInfoHandler(function (loadRequest, playbackConfig) {
-        playbackConfig.protectionSystem = cast.framework.ContentProtection.WIDEVINE;
+  // ── État interne du receiver ───────────────────────────────────────────
 
-        var headers    = drm.headers    || {};
-        var isDrmtoday = drm.provider === 'drmtoday';
+  /** Liste de médias en attente (enchaînement) — voir LOAD_VIDEO.queue */
+  let mediaQueue = [];
+  let queueIndex = 0;
+  let currentMedia = null; // dernier payload `media` chargé
 
-        if (isDrmtoday) {
-          // ── RTL Play / DRMtoday ──────────────────────────────────────────────
-          // licenseHandler remplace TOUT le cycle fetch+réponse.
-          // NE PAS définir licenseUrl simultanément (CAF utilise l'un OU l'autre).
-          playbackConfig.licenseHandler = makeDrmtodayLicenseHandler(drm.licenseUrl, headers);
-          // licenseUrl doit rester vide quand licenseHandler est défini
-          playbackConfig.licenseUrl = undefined;
-        } else {
-          // ── RTBF / TF1+ : réponse binaire standard ──────────────────────────
-          // licenseRequestHandler injecte seulement les headers ; CAF gère le reste.
-          playbackConfig.licenseUrl = drm.licenseUrl;
-          if (Object.keys(headers).length > 0) {
-            playbackConfig.licenseRequestHandler = function (requestInfo) {
-              requestInfo.headers = Object.assign({}, requestInfo.headers || {}, headers);
-            };
-          }
-        }
+  let introMarker = null;  // { startMs, endMs } courant, ou null
+  let outroMarker = null;
+  let skipIntroTimerHandle = null;
 
-        return playbackConfig;
-      });
-    } else {
-      // Pas de DRM — effacer tout handler précédent pour éviter un état résiduel
-      playerManager.setMediaPlaybackInfoHandler(null);
+  let stateIntervalHandle = null;
+  const STATE_UPDATE_INTERVAL_MS = 1000;
+
+  /** Garde anti-réentrance : empêche deux LOAD_VIDEO quasi simultanés de
+   *  se chevaucher (ex. double appel réseau lent côté sender). */
+  let loadInProgress = false;
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Configuration du PlaybackConfig (timeouts raisonnables, pas de
+  // comportement par défaut "écran noir" de CAF en cas de souci réseau).
+  // ─────────────────────────────────────────────────────────────────────
+
+  const playbackConfig = new cast.framework.PlaybackConfig();
+  playbackConfig.autoResumeDuration = 5;
+  playbackConfig.autoResumeNumberOfSegments = 2;
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Interception du LOAD standard de CAF : on construit nous-mêmes le
+  // LoadRequestData à partir du message custom LOAD_VIDEO plutôt que de
+  // dépendre du format MediaInformation standard envoyé par défaut par
+  // certains senders — ici tout passe par notre namespace custom, donc
+  // ce hook sert surtout de filet de sécurité / log.
+  // ─────────────────────────────────────────────────────────────────────
+
+  playerManager.setMessageInterceptor(
+    cast.framework.messages.MessageType.LOAD,
+    (loadRequestData) => {
+      StreamHubUI.showLoading(
+        loadRequestData?.media?.metadata?.title || ''
+      );
+      return loadRequestData;
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Écran d'attente par défaut tant qu'aucune vidéo n'a été chargée.
+  // ─────────────────────────────────────────────────────────────────────
+
+  StreamHubUI.showIdle();
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Construction d'un cast.framework.messages.MediaInformation à partir
+  // du payload `media` envoyé par le sender (voir messages.js).
+  // ─────────────────────────────────────────────────────────────────────
+
+  function buildMediaInformation(media) {
+    const mediaInfo = new cast.framework.messages.MediaInformation();
+    mediaInfo.contentId = media.url;
+    mediaInfo.contentUrl = media.url;
+    mediaInfo.contentType = media.contentType || 'application/x-mpegURL';
+    mediaInfo.streamType = (media.streamType === 'LIVE')
+      ? cast.framework.messages.StreamType.LIVE
+      : cast.framework.messages.StreamType.BUFFERED;
+
+    if (media.duration != null) {
+      mediaInfo.duration = media.duration;
     }
 
-    return loadRequestData;
-  }
-);
+    const metadata = new cast.framework.messages.GenericMediaMetadata();
+    metadata.title = media.title || '';
+    if (media.subtitle) metadata.subtitle = media.subtitle;
+    if (media.imageUrl) {
+      metadata.images = [{ url: media.imageUrl }];
+    }
+    mediaInfo.metadata = metadata;
 
-context.start({
-  useIdleTimeout:  true,
-  maxInactivity:   900,
-});
+    mediaInfo.customData = {
+      contentId: media.contentId,
+      introMarker: media.introMarker || null,
+      outroMarker: media.outroMarker || null,
+    };
+
+    return mediaInfo;
+  }
+
+  /**
+   * Charge un média et l'envoie au PlayerManager. Utilisé à la fois pour
+   * le LOAD_VIDEO initial et pour l'enchaînement automatique de la queue.
+   * Stoppe proprement toute lecture en cours avant de charger la suivante.
+   */
+  function loadMedia(media) {
+    if (loadInProgress) {
+      console.warn('[StreamHub Receiver] LOAD ignoré : un chargement est déjà en cours.');
+      return;
+    }
+    loadInProgress = true;
+
+    currentMedia = media;
+    introMarker = media.introMarker || null;
+    outroMarker = media.outroMarker || null;
+    StreamHubUI.setSkipIntroVisible(false);
+    clearSkipIntroTimer();
+
+    StreamHubUI.showLoading(media.title || '');
+
+    // Reconfigure le DRM / headers pour CE média avant de lancer le load.
+    StreamHubDrm.applyToPlaybackConfig(playbackConfig, media);
+    playerManager.setPlaybackConfig(playbackConfig);
+
+    const mediaInfo = buildMediaInformation(media);
+    const request = new cast.framework.messages.LoadRequestData();
+    request.media = mediaInfo;
+    if (media.startPositionMs != null) {
+      request.currentTime = media.startPositionMs / 1000;
+    }
+    request.autoplay = true;
+
+    playerManager.load(request).then(
+      () => {
+        loadInProgress = false;
+        StreamHubUI.hideAllOverlays();
+        broadcastVideoChanged();
+      },
+      (errorReason) => {
+        loadInProgress = false;
+        handlePlaybackError('UNKNOWN', `load() a échoué : ${errorReason}`);
+      }
+    );
+  }
+
+  /**
+   * Charge la vidéo suivante de la queue, le cas échéant. Retourne true
+   * si une vidéo suivante a été lancée, false si la queue est terminée.
+   */
+  function loadNextInQueue() {
+    if (queueIndex + 1 < mediaQueue.length) {
+      queueIndex += 1;
+      loadMedia(mediaQueue[queueIndex]);
+      return true;
+    }
+    return false;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Skip Intro : surveillance de la position de lecture pour afficher /
+  // masquer le bouton, et déclenchement du seek.
+  // ─────────────────────────────────────────────────────────────────────
+
+  function clearSkipIntroTimer() {
+    if (skipIntroTimerHandle != null) {
+      clearInterval(skipIntroTimerHandle);
+      skipIntroTimerHandle = null;
+    }
+  }
+
+  function startSkipIntroWatcher() {
+    clearSkipIntroTimer();
+    skipIntroTimerHandle = setInterval(() => {
+      if (!introMarker) return;
+      const positionMs = (playerManager.getCurrentTimeSec() || 0) * 1000;
+      const within = positionMs >= introMarker.startMs && positionMs < introMarker.endMs;
+      if (within !== StreamHubUI.isSkipIntroVisible()) {
+        StreamHubUI.setSkipIntroVisible(within, () => doSkipIntro(introMarker.endMs));
+        sendToAllSenders(ReceiverMessageType.SKIP_INTRO_VISIBILITY, { visible: within });
+      }
+    }, 250);
+  }
+
+  function doSkipIntro(toMs) {
+    playerManager.seek({ currentTime: toMs / 1000 });
+    StreamHubUI.setSkipIntroVisible(false);
+    sendToAllSenders(ReceiverMessageType.SKIP_INTRO_VISIBILITY, { visible: false });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Gestion des erreurs — jamais d'écran noir, toujours un overlay clair.
+  // ─────────────────────────────────────────────────────────────────────
+
+  function handlePlaybackError(category, debugDetail) {
+    clearSkipIntroTimer();
+    StreamHubUI.showError(StreamHubUI.errorCategoryLabel(category), debugDetail);
+    sendToAllSenders(ReceiverMessageType.PLAYBACK_ERROR, {
+      category,
+      message: debugDetail || '',
+      contentId: currentMedia ? currentMedia.contentId : undefined,
+    });
+  }
+
+  playerManager.addEventListener(
+    cast.framework.events.EventType.ERROR,
+    (event) => {
+      const DEC = cast.framework.events.DetailedErrorCode;
+      const detailedCode = event.detailedErrorCode;
+      // HTTP status réel s'il est disponible (présent sur les erreurs
+      // réseau de type SEGMENT_NETWORK / HLS_NETWORK_* / DASH_NETWORK,
+      // voir event.error.requestStatus.status dans les rapports CAF).
+      const httpStatus = event?.error?.requestStatus?.status;
+
+      let category = 'UNKNOWN';
+
+      const DRM_CODES = [
+        DEC.MEDIAKEYS_UNKNOWN, DEC.MEDIAKEYS_NETWORK,
+        DEC.MEDIAKEYS_UNSUPPORTED, DEC.MEDIAKEYS_WEBCRYPTO,
+        DEC.HLS_NETWORK_NO_KEY_RESPONSE, DEC.HLS_NETWORK_KEY_LOAD,
+      ];
+      const NETWORK_CODES = [
+        DEC.NETWORK_UNKNOWN, DEC.SEGMENT_NETWORK,
+        DEC.HLS_NETWORK_MASTER_PLAYLIST, DEC.HLS_NETWORK_PLAYLIST,
+        DEC.HLS_NETWORK_INVALID_SEGMENT, DEC.DASH_NETWORK,
+        DEC.SMOOTH_NETWORK, DEC.MEDIA_NETWORK,
+      ];
+      const NOT_FOUND_CODES = [
+        DEC.MANIFEST_UNKNOWN, DEC.HLS_MANIFEST_MASTER, DEC.HLS_MANIFEST_PLAYLIST,
+        DEC.DASH_MANIFEST_UNKNOWN, DEC.DASH_MANIFEST_NO_PERIODS,
+        DEC.DASH_MANIFEST_NO_MIMETYPE, DEC.SMOOTH_MANIFEST,
+        DEC.MEDIA_SRC_NOT_SUPPORTED,
+      ];
+
+      if (DRM_CODES.includes(detailedCode)) {
+        category = 'DRM';
+      } else if (NETWORK_CODES.includes(detailedCode)) {
+        // Distinction réseau / introuvable / timeout à partir du statut
+        // HTTP réel quand il est exposé par l'event ; sinon NETWORK par
+        // défaut (cas générique, ex. DNS, coupure de connexion).
+        if (httpStatus === 404) {
+          category = 'NOT_FOUND';
+        } else if (httpStatus === 403 || httpStatus === 401) {
+          category = 'INVALID_LICENSE';
+        } else if (httpStatus === 408 || httpStatus === 504) {
+          category = 'TIMEOUT';
+        } else {
+          category = 'NETWORK';
+        }
+      } else if (NOT_FOUND_CODES.includes(detailedCode)) {
+        category = 'NOT_FOUND';
+      } else if (detailedCode === DEC.LOAD_INTERRUPTED || detailedCode === DEC.LOAD_FAILED) {
+        category = 'NETWORK';
+      }
+
+      handlePlaybackError(category, `CAF error (code ${detailedCode}): ${JSON.stringify(event)}`);
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Fin de vidéo → enchaînement automatique si une suite existe.
+  // ─────────────────────────────────────────────────────────────────────
+
+  playerManager.addEventListener(
+    cast.framework.events.EventType.ENDED,
+    () => {
+      clearSkipIntroTimer();
+      const hasNext = loadNextInQueue();
+      if (!hasNext) {
+        StreamHubUI.showIdle();
+        currentMedia = null;
+      }
+    }
+  );
+
+  playerManager.addEventListener(
+    cast.framework.events.EventType.PLAYING,
+    () => {
+      StreamHubUI.hideAllOverlays();
+      startSkipIntroWatcher();
+    }
+  );
+
+  playerManager.addEventListener(
+    cast.framework.events.EventType.BUFFERING,
+    () => {
+      // On ne réaffiche pas l'overlay de chargement plein écran pendant un
+      // simple rebuffering en cours de lecture — le <cast-media-player>
+      // affiche déjà son propre indicateur natif sur la vidéo visible.
+      // L'overlay "Chargement..." ne sert qu'au LOAD initial.
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Construction du STATE_UPDATE envoyé périodiquement au(x) sender(s).
+  // ─────────────────────────────────────────────────────────────────────
+
+  function mapPlayerState() {
+    const PS = cast.framework.messages.PlayerState;
+    const s = playerManager.getPlayerState();
+    switch (s) {
+      case PS.IDLE: return 'IDLE';
+      case PS.LOADING: return 'LOADING';
+      case PS.PLAYING: return 'PLAYING';
+      case PS.PAUSED: return 'PAUSED';
+      case PS.BUFFERING: return 'BUFFERING';
+      default: return 'IDLE';
+    }
+  }
+
+  function buildStateUpdate() {
+    const audioTracksManager = playerManager.getAudioTracksManager();
+    const textTracksManager = playerManager.getTextTracksManager();
+
+    const activeAudioId = audioTracksManager.getActiveTrackIds()[0];
+    const activeAudioTrack = activeAudioId != null
+      ? audioTracksManager.getTrackById(activeAudioId)
+      : null;
+    const allAudioTracks = (audioTracksManager.getTracks() || []).map(t => ({
+      id: String(t.trackId),
+      label: t.name || t.language || `Piste ${t.trackId}`,
+    }));
+
+    const activeTextIds = textTracksManager.getActiveTrackIds() || [];
+    const activeTextId = activeTextIds.length > 0 ? activeTextIds[0] : null;
+    const activeTextTrack = activeTextId != null
+      ? textTracksManager.getTrackById(activeTextId)
+      : null;
+    const allTextTracks = (textTracksManager.getTracks() || []).map(t => ({
+      id: String(t.trackId),
+      label: t.name || t.language || `Sous-titres ${t.trackId}`,
+    }));
+
+    return {
+      playerState: mapPlayerState(),
+      contentId: currentMedia ? currentMedia.contentId : undefined,
+      positionMs: Math.round((playerManager.getCurrentTimeSec() || 0) * 1000),
+      durationMs: Math.round((playerManager.getDurationSec() || 0) * 1000),
+      playbackSpeed: playerManager.getPlaybackRate ? playerManager.getPlaybackRate() : 1.0,
+      quality: { height: 'auto' }, // sélection de qualité forcée non gérée (hors scope)
+      audioTrack: {
+        id: activeAudioTrack ? String(activeAudioTrack.trackId) : null,
+        label: activeAudioTrack ? (activeAudioTrack.name || activeAudioTrack.language) : null,
+        available: allAudioTracks,
+      },
+      subtitleTrack: {
+        id: activeTextTrack ? String(activeTextTrack.trackId) : null,
+        label: activeTextTrack ? (activeTextTrack.name || activeTextTrack.language) : null,
+        available: allTextTracks,
+      },
+      queueIndex,
+      queueLength: mediaQueue.length,
+    };
+  }
+
+  function broadcastState() {
+    sendToAllSenders(ReceiverMessageType.STATE_UPDATE, buildStateUpdate());
+  }
+
+  function broadcastVideoChanged() {
+    sendToAllSenders(ReceiverMessageType.VIDEO_CHANGED, {
+      contentId: currentMedia ? currentMedia.contentId : '',
+      queueIndex,
+    });
+  }
+
+  function startStateBroadcastLoop() {
+    if (stateIntervalHandle != null) return;
+    stateIntervalHandle = setInterval(broadcastState, STATE_UPDATE_INTERVAL_MS);
+  }
+
+  function sendToAllSenders(type, payload) {
+    context.sendCustomMessage(STREAMHUB_NAMESPACE, undefined, { type, ...payload });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Réception des messages custom envoyés par le sender.
+  // ─────────────────────────────────────────────────────────────────────
+
+  context.addCustomMessageListener(STREAMHUB_NAMESPACE, (event) => {
+    const msg = event.data;
+    if (!msg || !msg.type) return;
+
+    switch (msg.type) {
+      case SenderMessageType.LOAD_VIDEO: {
+        mediaQueue = [msg.media, ...(msg.queue || [])];
+        queueIndex = 0;
+        loadMedia(mediaQueue[0]);
+        break;
+      }
+
+      case SenderMessageType.SET_AUDIO_TRACK: {
+        const id = Number(msg.trackId);
+        if (!Number.isNaN(id)) {
+          playerManager.getAudioTracksManager().setActiveTrackIds([id]);
+          broadcastState();
+        }
+        break;
+      }
+
+      case SenderMessageType.SET_SUBTITLE_TRACK: {
+        const textTracksManager = playerManager.getTextTracksManager();
+        if (msg.trackId == null) {
+          textTracksManager.setActiveTrackIds([]);
+        } else {
+          const id = Number(msg.trackId);
+          if (!Number.isNaN(id)) {
+            textTracksManager.setActiveTrackIds([id]);
+          }
+        }
+        broadcastState();
+        break;
+      }
+
+      case SenderMessageType.SET_PLAYBACK_SPEED: {
+        const speed = Number(msg.speed);
+        if (!Number.isNaN(speed) && speed > 0) {
+          playerManager.setPlaybackRate(speed);
+          broadcastState();
+        }
+        break;
+      }
+
+      case SenderMessageType.SET_QUALITY: {
+        // Qualité forcée non gérée (hors scope) : message acquitté sans effet.
+        broadcastState();
+        break;
+      }
+
+      case SenderMessageType.SKIP_INTRO: {
+        doSkipIntro(msg.toMs);
+        break;
+      }
+
+      case SenderMessageType.REQUEST_STATE: {
+        broadcastState();
+        break;
+      }
+
+      default:
+        break;
+    }
+  });
+
+  // (Sélection de qualité forcée : hors scope, non implémentée.)
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Télécommande Chromecast :
+  // - OK déclenche le Skip Intro si affiché, sinon laisse passer (CAF gère
+  //   Lecture/Pause/Gauche/Droite nativement sur les touches dédiées).
+  // - Retour (touche back de la télécommande Android TV / Google TV) :
+  //   met en pause puis affiche l'écran d'attente si on est dans un état
+  //   stable, pour donner un point de sortie clair plutôt que de laisser
+  //   CAF décider d'un comportement implicite.
+  // ─────────────────────────────────────────────────────────────────────
+
+  playerManager.setMessageInterceptor(
+    cast.framework.messages.MessageType.SEEK,
+    (seekRequestData) => seekRequestData // laisse passer ; le seek standard suffit pour Gauche/Droite
+  );
+
+  /**
+   * Note SDK : le Web Receiver framework suit automatiquement les
+   * connexions/déconnexions de senders ; un listener SENDER_DISCONNECTED
+   * explicite n'est PAS requis pour le fonctionnement de base. On
+   * l'utilise ici uniquement pour un comportement métier précis : si plus
+   * AUCUN sender n'est connecté (téléphone fermé/déconnecté sans qu'aucun
+   * autre appareil ne pilote la session), on revient à l'écran d'attente
+   * plutôt que de laisser une vidéo orpheline jouer indéfiniment sans
+   * personne pour la contrôler ou sauvegarder sa progression.
+   */
+  context.addEventListener(
+    cast.framework.system.EventType.SENDER_DISCONNECTED,
+    () => {
+      const remainingSenders = context.getSenders();
+      if (remainingSenders && remainingSenders.length > 0) {
+        return; // un autre sender contrôle toujours la session, on ne touche à rien
+      }
+      clearSkipIntroTimer();
+      playerManager.stop();
+      currentMedia = null;
+      mediaQueue = [];
+      queueIndex = 0;
+      StreamHubUI.showIdle();
+    }
+  );
+
+  document.addEventListener('keydown', (event) => {
+    // 'Enter' correspond au bouton OK de la télécommande Chromecast/Android TV.
+    if (event.keyCode === 13 /* Enter/OK */) {
+      if (StreamHubUI.activateSkipIntroIfVisible()) {
+        event.stopPropagation();
+        event.preventDefault();
+      }
+      return;
+    }
+
+    // 'Escape' / codes 27 et 4 correspondent à la touche Retour selon les
+    // plateformes Cast (Android TV utilise souvent keyCode 4 — code
+    // historique Android BACK — en plus du standard web 27).
+    if (event.keyCode === 27 || event.keyCode === 4) {
+      const state = playerManager.getPlayerState();
+      const PS = cast.framework.messages.PlayerState;
+      if (state === PS.PLAYING || state === PS.PAUSED || state === PS.BUFFERING) {
+        playerManager.pause();
+        event.stopPropagation();
+        event.preventDefault();
+      }
+      // Si déjà à l'arrêt/IDLE, on laisse CAF gérer son comportement par
+      // défaut (peut fermer l'application sur certaines plateformes).
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Options de démarrage du receiver.
+  // ─────────────────────────────────────────────────────────────────────
+
+  const options = new cast.framework.CastReceiverOptions();
+  options.playbackConfig = playbackConfig;
+  options.disableIdleTimeout = true; // l'écran "Prêt à diffuser" gère l'attente, pas le timeout par défaut de CAF
+  options.maxInactivity = 3600; // secondes — la session ne se ferme pas trop vite entre deux vidéos
+
+  context.start(options);
+  startStateBroadcastLoop();
+})();

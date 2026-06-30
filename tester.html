@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>StreamHub — Testeur de Cast Receiver</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0e0e13;
+    --panel: #17171f;
+    --border: #2a2a35;
+    --text: #f0f0f5;
+    --muted: #9494a3;
+    --accent: #5b8cff;
+    --good: #4caf6a;
+    --bad: #e0556f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+    padding: 20px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; font-size: 14px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 800px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .panel h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin: 0 0 12px 0;
+  }
+
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 10px 0 4px;
+  }
+  input[type="text"], input[type="number"], select, textarea {
+    width: 100%;
+    padding: 9px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #0c0c11;
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 50px; font-family: monospace; font-size: 12px; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > * { flex: 1; }
+
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    margin: 4px 4px 0 0;
+  }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: #2a2a35; }
+  button.danger { background: var(--bad); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot.connected { background: var(--good); }
+  .dot.error { background: var(--bad); }
+
+  .kv {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    font-size: 12.5px;
+    row-gap: 4px;
+    column-gap: 8px;
+  }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .kv div:nth-child(even) { font-family: monospace; word-break: break-all; }
+
+  #log {
+    background: #0c0c11;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 11.5px;
+    height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #log .l-out { color: #7fb0ff; }
+  #log .l-in { color: #8be08b; }
+  #log .l-err { color: #ff8a8a; }
+  #log .l-sys { color: var(--muted); }
+
+  .checklist label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
+    margin: 6px 0;
+    cursor: pointer;
+  }
+  .checklist input[type="checkbox"] { margin-top: 2px; width: auto; }
+
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: #2a2a35;
+    color: var(--muted);
+    margin-left: 6px;
+  }
+
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>🧪 Testeur StreamHub Cast Receiver</h1>
+<div class="sub">
+  Sender de test (web) pour piloter le Custom Web Receiver sans passer par l'app Flutter.
+  À ouvrir dans <strong>Google Chrome desktop</strong> (le bouton Cast n'apparaît que dans Chrome avec le SDK Sender).
+</div>
+
+<div class="panel">
+  <h2>1. Connexion</h2>
+  <div class="row">
+    <div>
+      <label>Application ID du receiver (Cast Developer Console)</label>
+      <input type="text" id="appId" placeholder="ex: A1B2C3D4" />
+    </div>
+    <div style="flex: 0 0 auto; align-self: flex-end;">
+      <button id="btnInit">Initialiser le SDK Sender</button>
+    </div>
+  </div>
+  <div class="hint">
+    Laisser vide pour utiliser le récepteur média par défaut de Google
+    (<code>CC1AD845</code>) — utile uniquement pour vérifier que la connexion Cast
+    fonctionne, mais aucun de vos messages custom ne sera traité par ce
+    récepteur générique. Renseignez votre propre App ID pour tester réellement
+    <code>receiver.js</code>.
+  </div>
+
+  <div id="castButtonContainer" style="margin-top: 12px;">
+    <!-- Le bouton <google-cast-launcher> est injecté ici après init -->
+  </div>
+
+  <div class="status-line" style="margin-top: 10px;">
+    <span class="dot" id="connDot"></span>
+    <span id="connText">SDK non initialisé</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ───────────────────────── LOAD / QUEUE ───────────────────────── -->
+  <div class="panel">
+    <h2>2. Charger une vidéo <span class="pill">LOAD_VIDEO</span></h2>
+
+    <label>URL du manifeste (HLS .m3u8 ou DASH .mpd)</label>
+    <input type="text" id="mediaUrl" placeholder="https://.../manifest.m3u8" />
+
+    <label>Type de contenu</label>
+    <select id="contentType">
+      <option value="application/x-mpegURL">HLS — application/x-mpegURL</option>
+      <option value="application/dash+xml">DASH — application/dash+xml</option>
+      <option value="video/mp4">MP4 direct — video/mp4</option>
+    </select>
+
+    <label>Titre</label>
+    <input type="text" id="mediaTitle" value="Test StreamHub" />
+
+    <label>Type de flux</label>
+    <select id="streamType">
+      <option value="VOD">VOD</option>
+      <option value="LIVE">LIVE</option>
+    </select>
+
+    <details style="margin-top: 10px;">
+      <summary style="cursor: pointer; font-size: 12px; color: var(--muted);">DRM (optionnel)</summary>
+      <label>License URL</label>
+      <input type="text" id="drmLicenseUrl" placeholder="https://.../license" />
+      <label>Headers de licence (JSON)</label>
+      <textarea id="drmHeaders" placeholder='{"x-dt-auth-token": "..."}'></textarea>
+      <label><input type="checkbox" id="drmUnwrapJson" style="width:auto; display:inline; margin-right:6px;" />Unwrap JSON (cas DRMToday — réponse <code>{status, license}</code>)</label>
+    </details>
+
+    <details style="margin-top: 10px;">
+      <summary style="cursor: pointer; font-size: 12px; color: var(--muted);">Headers HTTP manifeste/segments (JSON, optionnel)</summary>
+      <textarea id="mediaHeaders" placeholder='{"Authorization": "Bearer ..."}'></textarea>
+    </details>
+
+    <details style="margin-top: 10px;">
+      <summary style="cursor: pointer; font-size: 12px; color: var(--muted);">Marqueur Skip Intro (optionnel)</summary>
+      <div class="row">
+        <div>
+          <label>Début (secondes)</label>
+          <input type="number" id="introStart" placeholder="0" />
+        </div>
+        <div>
+          <label>Fin (secondes)</label>
+          <input type="number" id="introEnd" placeholder="60" />
+        </div>
+      </div>
+    </details>
+
+    <details style="margin-top: 10px;">
+      <summary style="cursor: pointer; font-size: 12px; color: var(--muted);">Vidéo suivante dans la queue (optionnel — test enchaînement)</summary>
+      <label>URL de la 2ᵉ vidéo</label>
+      <input type="text" id="queueUrl" placeholder="https://.../autre-manifest.m3u8" />
+      <label>Type de contenu</label>
+      <select id="queueContentType">
+        <option value="application/x-mpegURL">HLS</option>
+        <option value="application/dash+xml">DASH</option>
+        <option value="video/mp4">MP4</option>
+      </select>
+    </details>
+
+    <div style="margin-top: 14px;">
+      <button id="btnLoad" disabled>Charger (LOAD_VIDEO)</button>
+    </div>
+  </div>
+
+  <!-- ───────────────────────── CONTROLES ───────────────────────── -->
+  <div class="panel">
+    <h2>3. Contrôles de lecture</h2>
+    <div class="row">
+      <button id="btnPlay" disabled>▶ Play</button>
+      <button id="btnPause" disabled>⏸ Pause</button>
+      <button id="btnStop" disabled class="danger">⏹ Stop</button>
+    </div>
+    <div class="row">
+      <button id="btnSeekBack" disabled>⏪ -10s</button>
+      <button id="btnSeekFwd" disabled>⏩ +10s</button>
+    </div>
+    <label>Aller à une position précise (secondes)</label>
+    <div class="row">
+      <input type="number" id="seekToValue" placeholder="120" />
+      <button id="btnSeekTo" disabled style="flex: 0 0 auto;">Seek</button>
+    </div>
+
+    <label>Vitesse de lecture <span class="pill">SET_PLAYBACK_SPEED</span></label>
+    <div class="row">
+      <button class="secondary speed-btn" data-speed="0.5" disabled>0.5×</button>
+      <button class="secondary speed-btn" data-speed="1" disabled>1×</button>
+      <button class="secondary speed-btn" data-speed="1.25" disabled>1.25×</button>
+      <button class="secondary speed-btn" data-speed="1.5" disabled>1.5×</button>
+      <button class="secondary speed-btn" data-speed="2" disabled>2×</button>
+    </div>
+
+    <label>Skip Intro manuel <span class="pill">SKIP_INTRO</span></label>
+    <div class="row">
+      <input type="number" id="skipIntroToValue" placeholder="Position cible (s)" />
+      <button id="btnSkipIntro" disabled style="flex: 0 0 auto;">Skip Intro</button>
+    </div>
+
+    <div style="margin-top: 10px;">
+      <button id="btnRequestState" disabled class="secondary">Forcer REQUEST_STATE</button>
+      <button id="btnEndSession" disabled class="danger">Terminer la session</button>
+    </div>
+  </div>
+
+  <!-- ───────────────────────── PISTES ───────────────────────── -->
+  <div class="panel">
+    <h2>4. Pistes audio / sous-titres</h2>
+    <label>Piste audio <span class="pill">SET_AUDIO_TRACK</span></label>
+    <select id="audioTrackSelect" disabled>
+      <option value="">— aucune info —</option>
+    </select>
+
+    <label>Sous-titres <span class="pill">SET_SUBTITLE_TRACK</span></label>
+    <select id="subtitleTrackSelect" disabled>
+      <option value="">— désactivés —</option>
+    </select>
+
+    <div class="hint">
+      Les listes se remplissent automatiquement à partir du dernier
+      STATE_UPDATE reçu une fois une vidéo avec plusieurs pistes chargée.
+    </div>
+  </div>
+
+  <!-- ───────────────────────── ÉTAT REÇU ───────────────────────── -->
+  <div class="panel">
+    <h2>5. Dernier état reçu du receiver <span class="pill">STATE_UPDATE</span></h2>
+    <div class="kv" id="stateKv">
+      <div>playerState</div><div>—</div>
+      <div>position</div><div>—</div>
+      <div>durée</div><div>—</div>
+      <div>vitesse</div><div>—</div>
+      <div>piste audio</div><div>—</div>
+      <div>sous-titres</div><div>—</div>
+      <div>queue</div><div>—</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ───────────────────────── CHECKLIST ───────────────────────── -->
+<div class="panel">
+  <h2>✅ Checklist de validation (cahier des charges)</h2>
+  <div class="grid checklist">
+    <div>
+      <label><input type="checkbox" /> Écran "Prêt à diffuser" visible avant tout chargement (pas d'écran noir)</label>
+      <label><input type="checkbox" /> Écran de chargement avec titre + spinner pendant LOAD</label>
+      <label><input type="checkbox" /> Lecture HLS démarre correctement</label>
+      <label><input type="checkbox" /> Lecture DASH démarre correctement</label>
+      <label><input type="checkbox" /> Lecture avec DRM Widevine fonctionne</label>
+      <label><input type="checkbox" /> Cas DRMToday (unwrap JSON) fonctionne si applicable</label>
+      <label><input type="checkbox" /> Play / Pause synchronisés app ↔ TV</label>
+      <label><input type="checkbox" /> Stop fonctionne et revient à l'écran d'attente</label>
+      <label><input type="checkbox" /> Seek avant / arrière fonctionne</label>
+      <label><input type="checkbox" /> Seek à une position précise fonctionne</label>
+    </div>
+    <div>
+      <label><input type="checkbox" /> Changement de piste audio en cours de lecture</label>
+      <label><input type="checkbox" /> Activation/désactivation des sous-titres</label>
+      <label><input type="checkbox" /> Changement de vitesse de lecture</label>
+      <label><input type="checkbox" /> Bouton Skip Intro apparaît au bon moment</label>
+      <label><input type="checkbox" /> Skip Intro déclenché depuis l'app fonctionne</label>
+      <label><input type="checkbox" /> Skip Intro déclenché depuis la télécommande (OK) fonctionne</label>
+      <label><input type="checkbox" /> Enchaînement automatique de la queue sans fermer la session</label>
+      <label><input type="checkbox" /> Chargement d'une nouvelle vidéo en cours de lecture (remplacement immédiat)</label>
+      <label><input type="checkbox" /> Écran d'erreur clair en cas d'URL invalide / 404</label>
+      <label><input type="checkbox" /> STATE_UPDATE reçu régulièrement (~1s) avec position à jour</label>
+    </div>
+  </div>
+</div>
+
+<!-- ───────────────────────── LOG ───────────────────────── -->
+<div class="panel">
+  <h2>Journal des messages</h2>
+  <div id="log"></div>
+  <button class="secondary" id="btnClearLog" style="margin-top: 8px;">Vider le journal</button>
+</div>
+
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+<script src="tester.js"></script>
+</body>
+</html>
