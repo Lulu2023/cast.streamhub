@@ -517,26 +517,38 @@
   // atteigne si on écoute en bubbling. En capture, notre listener voit
   // l'event AVANT le cast-media-player, donc avant qu'il puisse le
   // consommer en interne.
-  // Filet de sécurité supplémentaire : sur certains appareils/firmwares,
-  // le bouton OK de la télécommande peut être traduit directement par CAF
-  // en commande standard PAUSE plutôt qu'en keydown DOM brut (ce qui
-  // expliquerait une mise en pause au lieu du skip si le keydown n'était
-  // jamais vu). En interceptant le message PAUSE lui-même, on peut
-  // détourner cette commande vers le skip intro quand le bouton est
-  // affiché, indépendamment de la façon dont la télécommande a été
-  // traduite en amont.
-  playerManager.setMessageInterceptor(
-    cast.framework.messages.MessageType.PAUSE,
-    (pauseRequestData) => {
+  // Filet de sécurité UNIVERSEL pour le Skip Intro via télécommande.
+  //
+  // Pourquoi pas un simple `keydown` DOM : sur Android TV / Google TV
+  // (Mi Box, décodeurs, téléviseurs intégrés...), le bouton OK de la
+  // télécommande est généralement intercepté au niveau du système Android
+  // natif AVANT d'atteindre la WebView qui héberge ce receiver (confirmé
+  // par investigation : keyCode=23/DPAD_CENTER traité par le
+  // WindowManager Android, sans jamais déclencher le moindre événement
+  // DOM keydown côté JS). Compter sur `document.addEventListener('keydown')`
+  // n'est donc PAS universel.
+  //
+  // La bonne approche cross-device est d'utiliser l'API CAF de haut
+  // niveau cast.framework.events.EventType.REQUEST_PAUSE : cet event est
+  // déclenché par PlayerManager juste AVANT d'exécuter une pause, quelle
+  // que soit la source réelle de la commande (télécommande physique
+  // native, app sender, Google Assistant, contrôles tactiles) — c'est
+  // précisément le canal que CAF garantit cross-plateforme pour ce type
+  // d'interaction, contrairement aux événements clavier bas niveau.
+  playerManager.addEventListener(
+    cast.framework.events.EventType.REQUEST_PAUSE,
+    (event) => {
       if (StreamHubUI.isSkipIntroVisible()) {
         const skipped = StreamHubUI.activateSkipIntroIfVisible();
-        console.log('[StreamHub Receiver] PAUSE intercepté pendant Skip Intro visible → skip déclenché à la place : ' + skipped);
+        console.log('[StreamHub Receiver] REQUEST_PAUSE pendant Skip Intro visible → skip déclenché : ' + skipped);
+        // On ne peut pas annuler un EventType (contrairement à un
+        // setMessageInterceptor), donc la pause CAF va quand même
+        // s'exécuter brièvement ; on relance immédiatement la lecture
+        // pour neutraliser cet effet de bord et ne garder que le skip.
         if (skipped) {
-          // On annule la pause en ne laissant PAS passer la requête.
-          return null;
+          playerManager.play();
         }
       }
-      return pauseRequestData;
     }
   );
 
