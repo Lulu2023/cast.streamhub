@@ -309,27 +309,50 @@
   }
 
   function buildStateUpdate() {
-    const audioTracksManager = playerManager.getAudioTracksManager();
-    const textTracksManager = playerManager.getTextTracksManager();
+    let audioTrack = { id: null, label: null, available: [] };
+    let subtitleTrack = { id: null, label: null, available: [] };
 
-    const activeAudioId = audioTracksManager.getActiveTrackIds()[0];
-    const activeAudioTrack = activeAudioId != null
-      ? audioTracksManager.getTrackById(activeAudioId)
-      : null;
-    const allAudioTracks = (audioTracksManager.getTracks() || []).map(t => ({
-      id: String(t.trackId),
-      label: t.name || t.language || `Piste ${t.trackId}`,
-    }));
+    // Lecture des pistes isolée : pendant le parsing initial d'un
+    // manifeste (notamment juste après LOAD, avant que CAF ait fini
+    // d'analyser les AdaptationSets), ces appels peuvent légitimement
+    // échouer — on ne veut pas perdre position/durée/playerState pour
+    // autant.
+    try {
+      const audioTracksManager = playerManager.getAudioTracksManager();
+      const activeAudioId = audioTracksManager.getActiveTrackIds()[0];
+      const activeAudioTrack = activeAudioId != null
+        ? audioTracksManager.getTrackById(activeAudioId)
+        : null;
+      audioTrack = {
+        id: activeAudioTrack ? String(activeAudioTrack.trackId) : null,
+        label: activeAudioTrack ? (activeAudioTrack.name || activeAudioTrack.language) : null,
+        available: (audioTracksManager.getTracks() || []).map(t => ({
+          id: String(t.trackId),
+          label: t.name || t.language || `Piste ${t.trackId}`,
+        })),
+      };
+    } catch (e) {
+      console.warn('[StreamHub Receiver] Lecture pistes audio impossible (probablement manifeste pas encore prêt) :', e);
+    }
 
-    const activeTextIds = textTracksManager.getActiveTrackIds() || [];
-    const activeTextId = activeTextIds.length > 0 ? activeTextIds[0] : null;
-    const activeTextTrack = activeTextId != null
-      ? textTracksManager.getTrackById(activeTextId)
-      : null;
-    const allTextTracks = (textTracksManager.getTracks() || []).map(t => ({
-      id: String(t.trackId),
-      label: t.name || t.language || `Sous-titres ${t.trackId}`,
-    }));
+    try {
+      const textTracksManager = playerManager.getTextTracksManager();
+      const activeTextIds = textTracksManager.getActiveTrackIds() || [];
+      const activeTextId = activeTextIds.length > 0 ? activeTextIds[0] : null;
+      const activeTextTrack = activeTextId != null
+        ? textTracksManager.getTrackById(activeTextId)
+        : null;
+      subtitleTrack = {
+        id: activeTextTrack ? String(activeTextTrack.trackId) : null,
+        label: activeTextTrack ? (activeTextTrack.name || activeTextTrack.language) : null,
+        available: (textTracksManager.getTracks() || []).map(t => ({
+          id: String(t.trackId),
+          label: t.name || t.language || `Sous-titres ${t.trackId}`,
+        })),
+      };
+    } catch (e) {
+      console.warn('[StreamHub Receiver] Lecture pistes sous-titres impossible :', e);
+    }
 
     return {
       playerState: mapPlayerState(),
@@ -338,23 +361,24 @@
       durationMs: Math.round((playerManager.getDurationSec() || 0) * 1000),
       playbackSpeed: playerManager.getPlaybackRate ? playerManager.getPlaybackRate() : 1.0,
       quality: { height: 'auto' }, // sélection de qualité forcée non gérée (hors scope)
-      audioTrack: {
-        id: activeAudioTrack ? String(activeAudioTrack.trackId) : null,
-        label: activeAudioTrack ? (activeAudioTrack.name || activeAudioTrack.language) : null,
-        available: allAudioTracks,
-      },
-      subtitleTrack: {
-        id: activeTextTrack ? String(activeTextTrack.trackId) : null,
-        label: activeTextTrack ? (activeTextTrack.name || activeTextTrack.language) : null,
-        available: allTextTracks,
-      },
+      audioTrack,
+      subtitleTrack,
       queueIndex,
       queueLength: mediaQueue.length,
     };
   }
 
   function broadcastState() {
-    sendToAllSenders(ReceiverMessageType.STATE_UPDATE, buildStateUpdate());
+    try {
+      sendToAllSenders(ReceiverMessageType.STATE_UPDATE, buildStateUpdate());
+    } catch (e) {
+      // Ne JAMAIS laisser une exception ici tuer silencieusement le
+      // setInterval qui pilote toute la synchronisation d'état — sans
+      // cette protection, un seul appel CAF qui throw (ex. tracks pas
+      // encore disponibles pendant le parsing initial du manifeste) coupe
+      // tous les STATE_UPDATE futurs sans aucun signal visible côté sender.
+      console.error('[StreamHub Receiver] broadcastState() a échoué :', e);
+    }
   }
 
   function broadcastVideoChanged() {
