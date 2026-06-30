@@ -112,13 +112,22 @@ function onSessionStateChanged(event) {
 
 function onConnected() {
   setConnectionStatus(true);
-  log('sys', `Connecté à : ${castSession.getCastDevice().friendlyName}`);
+  setControlsEnabled(true); // priorité : ne doit jamais être bloqué par ce qui suit
 
-  castSession.addMessageListener(NAMESPACE, (ns, message) => {
-    handleIncomingMessage(message);
-  });
+  try {
+    const deviceName = castSession.getCastDevice()?.friendlyName || '(nom inconnu)';
+    log('sys', `Connecté à : ${deviceName}`);
+  } catch (e) {
+    log('err', `Impossible de lire le nom de l'appareil : ${e}`);
+  }
 
-  setControlsEnabled(true);
+  try {
+    castSession.addMessageListener(NAMESPACE, (ns, message) => {
+      handleIncomingMessage(message);
+    });
+  } catch (e) {
+    log('err', `Impossible d'écouter le namespace custom : ${e}`);
+  }
 }
 
 function onDisconnected() {
